@@ -66,7 +66,7 @@ def lambda_handler(event, context):
 
  
 def get_access_token():
-    url = fhttps://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token
+    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     # header information
     headers = {'Content-Type':'application/x-www-form-urlencoded'}
     # payload body
