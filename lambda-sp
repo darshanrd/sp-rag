@@ -1,2 +1,260 @@
 #sharepooint rag integration
 
+import json
+import requests
+import boto3
+import os
+from datetime import datetime, timedelta
+
+# Initialize S3 client
+s3_client = boto3.client('s3')
+bedrock_agent_client = boto3.client("bedrock-agent", region_name="us-east-1")
+
+KNOWLEDGE_BASE_ID = "provide knowledge base id"
+DATA_SOURCE_ID = "provide knowledge base data source id"
+
+# Microsoft Graph API credentials
+GRAPH_SCOPE = https://graph.microsoft.com/.default
+GRAPH_URL = https://graph.microsoft.com/v1.0
+CLIENT_ID = "get client ID of Sharepoint and store it in secrets manager"
+CLIENT_SECRET = "get client secret and store it in secrets manager"
+TENANT_ID = "get tenant id and store it in secrets manager"
+SITE_ID = "pass SP site location" # e.g., "yourdomain.sharepoint.com,guid1,guid2"
+DRIVE_ID = "Documents" # SharePoint document library drive ID
+ITEM_ID = "item folder name"
+COMPANY_SP_DOMAIN = "company domain name of sharepoint"
+
+
+# AWS credentials and Bedrock configuration
+AWS_REGION = "us-east-1" # Adjust based on your region
+S3_BUCKET = "your-s3-bucket-name"
+ 
+def lambda_handler(event, context):
+    # TODO implement
+    access_token = get_access_token()
+    # create headers
+    base_headers = {
+        'Authorization': f'Bearer {access_token}',
+        'content-type': 'application/json'
+    }
+
+    # get SharePoint site id
+    site_id = get_sharepoint_site_id(base_headers)
+ 
+    # get specific drive id (directory where file has to be uploaded) within the site_id
+    drive_id = get_drive_id(access_token, site_id)     # drive_id for the SharePoint drive-'S3 Integration Test Library'
+
+    item_id = get_items_list_from_drive(site_id, drive_id, base_headers)
+
+    file_list = get_file_list(site_id, item_id, base_headers)  # get list of files in a specific drive from SharePoint
+
+    changed_files = get_changed_documents(site_id, drive_id, base_headers)
+    print(changed_files)
+
+    for file in changed_files:
+        fileid = (file['id'])
+        filename = (file['name'])
+        download_changed_document(site_id,drive_id,base_headers, fileid, filename)
+        sync_bedrock_knowledge_base(KNOWLEDGE_BASE_ID,DATA_SOURCE_ID)
+
+    #sync_bedrock_knowledge_base(KNOWLEDGE_BASE_ID,DATA_SOURCE_ID)
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Hello from Lambda!')
+    }
+
+ 
+def get_access_token():
+    url = fhttps://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token
+    # header information
+    headers = {'Content-Type':'application/x-www-form-urlencoded'}
+    # payload body
+    body = {
+        'client_id': CLIENT_ID,
+        'scope': GRAPH_SCOPE,
+        'client_secret': CLIENT_SECRET,
+        'grant_type': 'client_credentials',
+    }
+
+    response = requests.post(url, headers=headers, data=body)
+    response.raise_for_status()
+    if response.status_code == 200:
+        return response.json()['access_token']
+    else:
+        raise Exception(f"Error retrieving token: {response.text}")
+
+# get SharePoint site id
+def get_sharepoint_site_id(base_headers):
+
+    # create SharePoint site API
+    site_id_url = f"{GRAPH_URL}/sites/{COMPANY_SP_DOMAIN}:/teams/{SITE_ID}?$select=id"
+    response = requests.get(site_id_url, headers=base_headers, timeout=10)
+    site_id = response.json().get("id")
+    return site_id
+
+
+def get_drive_id(access_token, site_id):
+
+    # create headers
+    base_headers = {
+        'Authorization': f'Bearer {access_token}',
+        'content-type': 'application/json'
+    }
+
+    drives_url = f"{GRAPH_URL}/sites/{site_id}/drives?$select=name,id"
+    response = requests.get(drives_url, headers=base_headers, timeout=10)
+ 
+    drives = response.json().get('value', [])
+    drive_id = ''
+    for drive in drives:
+        if drive['name'] == DRIVE_ID:
+            drive_id = drive['id']    
+    return drive_id
+
+ 
+def get_items_id(access_token, site_id, drive_id):
+    # create headers
+    base_headers = {
+        'Authorization': f'Bearer {access_token}',
+        'content-type': 'application/json'
+    }
+
+    drives_url = f"{GRAPH_URL}/sites/{site_id}/drives/{drive_id}/root:/{ITEM_ID}?$select=name,id"
+    response = requests.get(drives_url, headers=base_headers, timeout=10)
+
+    drives = response.json().get('value', [])
+    drive_id = ''
+    for drive in drives:
+        if drive['name'] == DRIVE_ID:
+            drive_id = drive['id']
+    return drive_id
+
+# function to get the list of files from a specific drive in SharePoint
+def get_items_list_from_drive(site_id, drive_id, base_headers):
+    list_files_url = f"{GRAPH_URL}/sites/{site_id}/drives/{drive_id}/root/children?$select=id,name"
+    response = requests.get(list_files_url, headers=base_headers)
+    files = response.json().get('value', [])
+    #items = [file['name'] for file in files]
+    for file in files:
+        if file['name'] == ITEM_ID:
+            item_id = file['id']
+    return item_id
+
+# function to get the list of files from SharePoint
+def get_file_list(site_id, item_id, base_headers):
+    list_of_dict = []
+    dir_url = f"{GRAPH_URL}/sites/{site_id}/drive/items/{item_id}/children?$select=id,name,size,lastModifiedDateTime"
+    response = requests.get(dir_url, headers=base_headers, timeout=10)
+    items_list = response.json().get('value', [])
+    print("printing each items \n")
+    for items in items_list:
+        print(items)
+        print("\n")
+       
+    return 1
+
+ 
+def get_changed_documents(site_id,drive_id,base_headers):
+    """Fetch recently changed documents from SharePoint using delta query."""
+    # Delta query URL to track changes in the document library
+    delta_url = f"{GRAPH_URL}/sites/{site_id}/drives/{drive_id}/root/delta"
+    #headers = {"Authorization": f"Bearer {access_token}"}
+ 
+    # Get changes from the last 24 hours (adjust as needed)
+    response = requests.get(delta_url, headers=base_headers, timeout=10)
+    #response = requests.get(delta_url, headers=headers)
+    response.raise_for_status()
+    delta_data = response.json()
+
+    # Filter for changed files (e.g., modified in the last day)
+    changed_files = []
+    for item in delta_data.get("value", []):
+        print(item["name"])
+        if "file" in item and "lastModifiedDateTime" in item:
+            last_modified = datetime.strptime(item["lastModifiedDateTime"], "%Y-%m-%dT%H:%M:%SZ")
+            if last_modified > datetime.utcnow() - timedelta(days=1):
+                changed_files.append({
+                    "id": item["id"],
+                    "name": item["name"],
+                    "last_modified": item["lastModifiedDateTime"]
+                    })
+
+    return changed_files
+
+ 
+def download_changed_document(site_id,drive_id,base_headers, file_id, file_name):
+    """Download the changed document from SharePoint."""
+    download_url = f"{GRAPH_URL}/sites/{site_id}/drives/{drive_id}/items/{file_id}/content"
+    print(download_url)
+
+    #headers = {"Authorization": f"Bearer {access_token}"}
+    #response = requests.get(download_url, headers=headers)
+    response = requests.get(download_url, headers=base_headers, timeout=10)
+    response.raise_for_status()
+ 
+    # Save the file locally
+    #with open(LOCAL_FILE_PATH, "wb") as f:
+    #f.write(response.content)
+    #print(f"Downloaded {file_name} to {LOCAL_FILE_PATH}")
+
+    if (response.status_code == 200):
+        response = s3_client.put_object(Bucket="bucket_name", Key="folder path"+file_name, Body=response.content)
+        # add an S3 Object Tag
+        s3_client.put_object_tagging(
+            Bucket="bucket name",
+            Key="folder path"+file_name,
+            Tagging={
+                "TagSet": [{"Key": 'file-edited-from-sharepoint', "Value": 'sharepoint'}
+                ]
+            }
+        )
+
+        return {
+            'statusCode': response['ResponseMetadata']['HTTPStatusCode'],
+            'body': json.dumps('File uploaded to S3 successfully'),
+            's3_response': response
+        }
+    else:
+        return {
+            'statusCode': response.status_code,
+            'body': json.dumps('Unable to download from SharePoint'),
+            'sharepoint_response': response.json()
+        }
+    #sync_bedrock_knowledge_base()
+ 
+
+def sync_bedrock_knowledge_base(KNOWLEDGE_BASE_ID,DATA_SOURCE_ID):
+    """Sync the updated document with Amazon Bedrock knowledge base."""
+    #client_token = str(uuid.uuid4())
+    description = "Ingesting new documents into the knowledge base"
+ 
+    # Start ingestion job to sync the updated data source
+
+    response = bedrock_agent_client.start_ingestion_job(
+        #clientToken=client_token,
+        knowledgeBaseId=KNOWLEDGE_BASE_ID,
+        dataSourceId=DATA_SOURCE_ID,
+        description=description
+    )
+
+    #sync the document
+    #response = bedrock_agent_client.start_data_source_sync_job(
+    #knowledgeBaseId=KNOWLEDGE_BASE_ID,
+    #dataSourceId=DATA_SOURCE_ID
+    #)
+    print(f"Started Bedrock ingestion job: {response['ingestionJob']['ingestionJobId']}")
+
+ 
+
+def get_access_token_new():
+    """Authenticate with Microsoft Graph API and get access token."""
+    authority = fhttps://login.microsoftonline.com/{TENANT_ID}
+    app = msal.ConfidentialClientApplication(CLIENT_ID, authority=authority, client_credential=CLIENT_SECRET)
+
+    result = app.acquire_token_for_client(scopes=[https://graph.microsoft.com/.default])
+  
+    if "access_token" in result:
+        return result["access_token"]
+    else:
+        raise Exception("Failed to acquire token:", result.get("error_description"))
